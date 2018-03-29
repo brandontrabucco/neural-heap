@@ -387,16 +387,18 @@ class Experiment(object):
 
     def train(
             self,
-            model_checkpoint=None):
+            use_pretrained=False):
+        model_checkpoint = None
         with tf.Graph().as_default():
-            if model_checkpoint is None:
+            if not use_pretrained:
                 model_saver = tf.train.Saver(
                     var_list=(self.build_graph() 
                         + tf.get_collection(self.config.GLOBAL_STEP_OP)))
                 self.config(1, 0)
             else:
+                model_checkpoint = tf.train.latest_checkpoint(self.config.CHECKPOINT_BASEDIR)
                 model_saver = tf.train.import_meta_graph(
-                    model_checkpoint + ".meta")
+                    tf.get + ".meta")
                 self.config(1, int(model_checkpoint.split("-")[1]))
             data_saver = TrainRecordHook(self.config)
             with tf.train.MonitoredTrainingSession(hooks=[
