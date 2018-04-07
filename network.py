@@ -75,8 +75,8 @@ class ValRecordHook(tf.train.SessionRunHook):
         batch_speed = 1.0 / (current_time - self.start_time + 1e-3)
         self.start_time = current_time
         for i, j in zip(
-                current_labels.flatten().tolist(),
-                current_prediction.flatten().tolist()):
+                current_labels.flatten().tolist()[self.config.DATASET_COLUMNS:],
+                current_prediction.flatten().tolist()[self.config.DATASET_COLUMNS:]):
             if i == j:
                 self.correct_elements += 1
 
@@ -97,8 +97,9 @@ class Configuration(object):
         self.TRAIN_EPOCH_SIZE = self.TRAIN_EXAMPLES // self.BATCH_SIZE
         self.VAL_EPOCH_SIZE = self.VAL_EXAMPLES // self.BATCH_SIZE
         self.NUM_THREADS = 2
-        self.TOTAL_LOGS = 20
-        self.CHECKPOINT_BASEDIR = "G:/My Drive/Academic/Research/Neural Heap/saves"
+        self.TOTAL_LOGS = 10
+        self.CHECKPOINT_BASEDIR = "G:/My Drive/Academic/Research/Neural Heap/saves/"
+        self.PLOTS_BASEDIR = "G:/My Drive/Academic/Research/Neural Heap/plots/"
         self.PREFIX_TOTAL = "total"
         self.PREFIX_CONTROLLER = "controller"
         self.EXTENSION_NUMBER = (lambda number: "_" + str(number))
@@ -118,8 +119,8 @@ class Configuration(object):
         self.LABELS_DETOKENIZED_OP = "labels_d_op"
         self.TRAIN_OP = "train_op"
         self.INCREMENT_OP = "increment_op"
-        self.ENSEMBLE_SIZE = 4
-        self.LSTM_SIZE = (self.DATASET_RANGE * 2 * self.ENSEMBLE_SIZE)
+        self.ENSEMBLE_SIZE = 1
+        self.LSTM_SIZE = (self.DATASET_RANGE * 4 * self.ENSEMBLE_SIZE)
         self.LSTM_DEPTH = 2
         self.DROPOUT_PROBABILITY = (1 / self.ENSEMBLE_SIZE)
         self.USE_DROPOUT = True
@@ -267,13 +268,15 @@ class Experiment(object):
 
     def inference(self, x_batch):
         with tf.variable_scope(
-                (self.config.PREFIX_CONTROLLER + self.config.EXTENSION_NUMBER(1))) as scope:
+                (self.config.PREFIX_CONTROLLER + self.config.EXTENSION_NUMBER(0))) as scope:
             lstm_forward = [tf.contrib.rnn.DropoutWrapper(
-                tf.contrib.rnn.LSTMCell(self.config.LSTM_SIZE), 
+                tf.contrib.rnn.LSTMCell(
+                    self.config.LSTM_SIZE), 
                 input_keep_prob=1.0, 
                 output_keep_prob=self.config.DROPOUT_PROBABILITY) for i in range(self.config.LSTM_DEPTH)]
             lstm_backward = [tf.contrib.rnn.DropoutWrapper(
-                tf.contrib.rnn.LSTMCell(self.config.LSTM_SIZE), 
+                tf.contrib.rnn.LSTMCell(
+                    self.config.LSTM_SIZE), 
                 input_keep_prob=1.0, 
                 output_keep_prob=self.config.DROPOUT_PROBABILITY) for i in range(self.config.LSTM_DEPTH)]
             lstm_forward = tf.contrib.rnn.MultiRNNCell(lstm_forward)
@@ -327,10 +330,9 @@ class Experiment(object):
             labels,
             collection):
         entropy = tf.reduce_mean(
-            tf.nn.softmax_cross_entropy_with_logits(
+            tf.nn.softmax_cross_entropy_with_logits_v2(
                 labels=labels,
-                logits=prediction,
-                dim=-1))
+                logits=prediction))
         tf.add_to_collection(collection, entropy)
         return entropy
 
@@ -398,7 +400,7 @@ class Experiment(object):
             else:
                 model_checkpoint = tf.train.latest_checkpoint(self.config.CHECKPOINT_BASEDIR)
                 model_saver = tf.train.import_meta_graph(
-                    tf.get + ".meta")
+                    model_checkpoint + ".meta")
                 self.config(1, int(model_checkpoint.split("-")[1]))
             data_saver = TrainRecordHook(self.config)
             with tf.train.MonitoredTrainingSession(hooks=[
@@ -409,6 +411,8 @@ class Experiment(object):
                         save_steps=self.config.TRAIN_STOP_AT_STEP,
                         saver=model_saver),
                     data_saver]) as session:
+                print("")
+                print(datetime.now(), "Begin Training Experiment.")
                 if model_checkpoint is not None:
                     model_saver.restore(session, model_checkpoint)
                 else:
@@ -419,6 +423,8 @@ class Experiment(object):
                     session.run([
                         tf.get_collection(self.config.INCREMENT_OP)[0],
                         tf.get_collection(self.config.TRAIN_OP)[0]])
+                print(datetime.now(), "Finish Training Experiment.")
+                print("")
             plt.plot(
                 data_saver.iteration_points, 
                 data_saver.loss_points,
@@ -428,6 +434,7 @@ class Experiment(object):
             plt.ylabel("Mean Cross Entropy Loss")
             plt.grid(True)
             plt.savefig(
+                self.config.PLOTS_BASEDIR + 
                 datetime.now().strftime("%Y_%B_%d_%H_%M_%S") + 
                 "_training_loss.png")
             plt.close()
@@ -442,19 +449,28 @@ class Experiment(object):
             with tf.train.MonitoredTrainingSession(hooks=[
                     tf.train.StopAtStepHook(num_steps=self.config.VAL_STOP_AT_STEP),
                     data_saver]) as session:
+                print("")
+                print(datetime.now(), "Begin Testing Experiment.")
                 model_saver.restore(session, model_checkpoint)
                 while not session.should_stop():
                     session.run([
                         tf.get_collection(self.config.INCREMENT_OP)[0],
                         tf.get_collection(self.config.LABELS_DETOKENIZED_OP)[0],
                         tf.get_collection(self.config.PREDICTION_DETOKENIZED_OP)[0]])
-            return (data_saver.correct_elements
-                / (self.config.VAL_EXAMPLES * self.config.DATASET_COLUMNS * 2))
+                accuracy = (data_saver.correct_elements
+                    / (self.config.VAL_EXAMPLES * self.config.DATASET_COLUMNS * 2))
+                print(
+                    datetime.now(),
+                    "Val Accuracy: %.2f %%" % (100 * accuracy))
+                print(datetime.now(), "Finish Testing Experiment.")
+                print("")
+            return accuracy
 
 
 if __name__ == "__main__":
     net = Experiment()
     net.train()
-    print(
-        datetime.now(),
-        "Val Accuracy: %.2f %%" % (100 * net.test()))
+    net.test()
+    for i in range(10):
+        net.train(use_pretrained=True)
+        net.test()
