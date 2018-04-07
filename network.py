@@ -24,24 +24,38 @@ class TrainRecordHook(tf.train.SessionRunHook):
             run_context):
         return tf.train.SessionRunArgs([
             tf.get_collection(self.config.GLOBAL_STEP_OP)[0],
-            tf.get_collection(self.config.LOSS_OP)[0]])
+            tf.get_collection(self.config.LOSS_OP)[0],
+            tf.get_collection(self.config.LABELS_DETOKENIZED_OP)[0],
+            tf.get_collection(self.config.PREDICTION_DETOKENIZED_OP)[0]])
 
     def after_run(
             self,
             run_context,
             run_values):
-        current_step, current_loss = run_values.results
+        current_step, current_loss, current_labels, current_prediction = run_values.results
         current_time = time()
         batch_speed = 1.0 / (current_time - self.start_time + 1e-3)
         self.start_time = current_time
         if current_step % max(self.config.TRAIN_ITERATIONS // self.config.TOTAL_LOGS, 1) == 0:
+            correct_elements = 0
+            current_labels = current_labels[:, self.config.DATASET_COLUMNS:]
+            current_prediction = current_prediction[:, self.config.DATASET_COLUMNS:]
+            print("Label:", current_labels[0], "Prediction:", current_prediction[0])
+            for i, j in zip(
+                current_labels.flatten().tolist(),
+                current_prediction.flatten().tolist()):
+                if i == j:
+                    correct_elements += 1
             print(
                 datetime.now(),
                 "Speed: %.2f" % batch_speed,
                 "ETA: %.2f" % ((self.config.TRAIN_STOP_AT_STEP - current_step) 
                     / batch_speed / 60 / 60),
                 "Iteration: %d" % current_step, 
-                "Loss: %.2f" % current_loss)
+                "Loss: %.2f" % current_loss,
+                "Train Accuracy: %.2f" % (100 * correct_elements 
+                    / self.config.BATCH_SIZE 
+                    / self.config.DATASET_COLUMNS))
             self.iteration_points.append(current_step)
             self.loss_points.append(current_loss)
 
@@ -69,14 +83,14 @@ class ValRecordHook(tf.train.SessionRunHook):
             run_context,
             run_values):
         current_labels, current_prediction = run_values.results
-        current_labels = current_labels[self.config.DATASET_COLUMNS:]
-        current_prediction = current_prediction[self.config.DATASET_COLUMNS:]
+        current_labels = current_labels[:, self.config.DATASET_COLUMNS:]
+        current_prediction = current_prediction[:, self.config.DATASET_COLUMNS:]
         current_time = time()
         batch_speed = 1.0 / (current_time - self.start_time + 1e-3)
         self.start_time = current_time
         for i, j in zip(
-                current_labels.flatten().tolist()[self.config.DATASET_COLUMNS:],
-                current_prediction.flatten().tolist()[self.config.DATASET_COLUMNS:]):
+                current_labels.flatten().tolist(),
+                current_prediction.flatten().tolist()):
             if i == j:
                 self.correct_elements += 1
 
@@ -118,15 +132,15 @@ class Configuration(object):
         self.INPUTS_DETOKENIZED_OP = "inputs_d_op"
         self.LABELS_DETOKENIZED_OP = "labels_d_op"
         self.TRAIN_OP = "train_op"
-        self.INCREMENT_OP = "increment_op"
-        self.ENSEMBLE_SIZE = 1
+        self.VAL_OP = "val_op"
+        self.ENSEMBLE_SIZE = 3
         self.LSTM_SIZE = (self.DATASET_RANGE * 4 * self.ENSEMBLE_SIZE)
-        self.LSTM_DEPTH = 2
+        self.LSTM_DEPTH = 4
         self.DROPOUT_PROBABILITY = (1 / self.ENSEMBLE_SIZE)
         self.USE_DROPOUT = True
         self.INITIAL_LEARNING_RATE = 0.001
         self.DECAY_STEPS = self.TRAIN_EPOCH_SIZE
-        self.DECAY_FACTOR = 0.8
+        self.DECAY_FACTOR = 0.5
 
     def __call__(self, num_epoch, offset):
         self.NUM_EPOCH = num_epoch
@@ -361,7 +375,6 @@ class Experiment(object):
         increment = tf.assign(
             global_step,
             global_step + 1)
-        tf.add_to_collection(self.config.INCREMENT_OP, increment)
         inputs_batch, labels_batch = self.get_training_batch()
         tf.add_to_collection(self.config.INPUTS_OP, inputs_batch)
         tf.add_to_collection(self.config.LABELS_OP, labels_batch)
@@ -384,7 +397,8 @@ class Experiment(object):
         controller_parameters = tf.get_collection(
             self.config.PREFIX_CONTROLLER + self.config.COLLECTION_PARAMETERS)
         gradient = self.minimize(loss, controller_parameters)
-        tf.add_to_collection(self.config.TRAIN_OP, gradient)
+        tf.add_to_collection(self.config.TRAIN_OP, tf.group(gradient, increment))
+        tf.add_to_collection(self.config.VAL_OP, tf.group(increment))
         return controller_parameters
 
     def train(
@@ -408,7 +422,7 @@ class Experiment(object):
                         num_steps=self.config.TRAIN_STOP_AT_STEP),
                     tf.train.CheckpointSaverHook(
                         self.config.CHECKPOINT_BASEDIR,
-                        save_steps=self.config.TRAIN_STOP_AT_STEP,
+                        save_steps=self.config.TRAIN_ITERATIONS,
                         saver=model_saver),
                     data_saver]) as session:
                 print("")
@@ -420,9 +434,8 @@ class Experiment(object):
                         session,
                         tf.get_collection(self.config.GLOBAL_STEP_OP)[0])
                 while not session.should_stop():
-                    session.run([
-                        tf.get_collection(self.config.INCREMENT_OP)[0],
-                        tf.get_collection(self.config.TRAIN_OP)[0]])
+                    session.run(
+                        tf.get_collection(self.config.TRAIN_OP))
                 print(datetime.now(), "Finish Training Experiment.")
                 print("")
             plt.plot(
@@ -453,12 +466,10 @@ class Experiment(object):
                 print(datetime.now(), "Begin Testing Experiment.")
                 model_saver.restore(session, model_checkpoint)
                 while not session.should_stop():
-                    session.run([
-                        tf.get_collection(self.config.INCREMENT_OP)[0],
-                        tf.get_collection(self.config.LABELS_DETOKENIZED_OP)[0],
-                        tf.get_collection(self.config.PREDICTION_DETOKENIZED_OP)[0]])
+                    session.run(
+                        tf.get_collection(self.config.VAL_OP))
                 accuracy = (data_saver.correct_elements
-                    / (self.config.VAL_EXAMPLES * self.config.DATASET_COLUMNS * 2))
+                    / (self.config.VAL_EXAMPLES * self.config.DATASET_COLUMNS))
                 print(
                     datetime.now(),
                     "Val Accuracy: %.2f %%" % (100 * accuracy))
