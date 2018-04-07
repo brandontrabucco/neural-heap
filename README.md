@@ -1,2 +1,2 @@
 # neural-heap
-This is an experimental project training an attention LSTM that interfaces with a heap data structure to perform basic algorithms such as sorting.
+This is an experimental project training feedforward neural networks that interface with a heap data structure to perform basic algorithms such as sorting.
