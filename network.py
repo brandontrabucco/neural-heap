@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import os
 from time import time
 from datetime import datetime
+from tf_heap import TFMinHeapPQ
 
 
 class TrainRecordHook(tf.train.SessionRunHook):
@@ -53,7 +54,7 @@ class TrainRecordHook(tf.train.SessionRunHook):
                     / batch_speed / 60 / 60),
                 "Iteration: %d" % current_step, 
                 "Loss: %.2f" % current_loss,
-                "Train Accuracy: %.2f" % (100 * correct_elements 
+                "Train Accuracy: %.2f %%" % (100 * correct_elements 
                     / self.config.BATCH_SIZE 
                     / self.config.DATASET_COLUMNS))
             self.iteration_points.append(current_step)
@@ -107,15 +108,22 @@ class Configuration(object):
         self.DATASET_COLUMNS = 7
         self.DATASET_RANGE = 32
         self.DATASET_DEFAULT = self.DATASET_RANGE // 2
-        self.BATCH_SIZE = 32
+        self.HEAP_SIZE = self.DATASET_RANGE
+        self.OP_SIZE = 3
+
+        self.BATCH_SIZE = 128
         self.TRAIN_EPOCH_SIZE = self.TRAIN_EXAMPLES // self.BATCH_SIZE
         self.VAL_EPOCH_SIZE = self.VAL_EXAMPLES // self.BATCH_SIZE
         self.NUM_THREADS = 2
         self.TOTAL_LOGS = 10
         self.CHECKPOINT_BASEDIR = "G:/My Drive/Academic/Research/Neural Heap/saves/"
         self.PLOTS_BASEDIR = "G:/My Drive/Academic/Research/Neural Heap/plots/"
+
         self.PREFIX_TOTAL = "total"
         self.PREFIX_CONTROLLER = "controller"
+        self.PREFIX_OUTPUT = "output"
+        self.PREFIX_OPERATOR = "operator"
+        self.PREFIX_OPERAND = "operand"
         self.EXTENSION_NUMBER = (lambda number: "_" + str(number))
         self.EXTENSION_LOSS = "_loss"
         self.EXTENSION_WEIGHTS = "_weights"
@@ -123,6 +131,7 @@ class Configuration(object):
         self.COLLECTION_LOSSES = "_losses"
         self.COLLECTION_PARAMETERS = "_parameters"
         self.COLLECTION_ACTIVATIONS = "_activations"
+
         self.LOSS_OP = "loss_op"
         self.GLOBAL_STEP_OP = "global_step"
         self.PREDICTION_OP = "prediction_op"
@@ -133,6 +142,7 @@ class Configuration(object):
         self.LABELS_DETOKENIZED_OP = "labels_d_op"
         self.TRAIN_OP = "train_op"
         self.VAL_OP = "val_op"
+
         self.ENSEMBLE_SIZE = 3
         self.LSTM_SIZE = (self.DATASET_RANGE * 4 * self.ENSEMBLE_SIZE)
         self.LSTM_DEPTH = 4
@@ -154,6 +164,10 @@ class Experiment(object):
 
     def __init__(self):
         self.config = Configuration()
+        self.heap = TFMinHeapPQ(
+            "TFMinHeapPQ1",
+            self.config.BATCH_SIZE,
+            self.config.DATASET_RANGE)
 
     def tokenize_example(self, example):
         return tf.one_hot(
@@ -288,43 +302,67 @@ class Experiment(object):
                     self.config.LSTM_SIZE), 
                 input_keep_prob=1.0, 
                 output_keep_prob=self.config.DROPOUT_PROBABILITY) for i in range(self.config.LSTM_DEPTH)]
-            lstm_backward = [tf.contrib.rnn.DropoutWrapper(
-                tf.contrib.rnn.LSTMCell(
-                    self.config.LSTM_SIZE), 
-                input_keep_prob=1.0, 
-                output_keep_prob=self.config.DROPOUT_PROBABILITY) for i in range(self.config.LSTM_DEPTH)]
             lstm_forward = tf.contrib.rnn.MultiRNNCell(lstm_forward)
-            lstm_backward = tf.contrib.rnn.MultiRNNCell(lstm_backward)
-            output_batch, state_batch = tf.nn.bidirectional_dynamic_rnn(
-                lstm_forward,
-                lstm_backward,
-                x_batch,
-                initial_state_fw=lstm_forward.zero_state(
-                    self.config.BATCH_SIZE,
-                    tf.float32),
-                initial_state_bw=lstm_forward.zero_state(
-                    self.config.BATCH_SIZE,
-                    tf.float32),
-                dtype=tf.float32)
-            parameters = tf.get_collection(
-                tf.GraphKeys.TRAINABLE_VARIABLES,
-                scope=scope.name)
-            for p in parameters:
-                tf.add_to_collection(
-                    (self.config.PREFIX_CONTROLLER + self.config.COLLECTION_PARAMETERS),
-                    p)
-        with tf.variable_scope(
-                (self.config.PREFIX_CONTROLLER + self.config.EXTENSION_NUMBER(1))) as scope:
-            linear_w = self.initialize_weights_cpu(
-                (scope.name + self.config.EXTENSION_WEIGHTS), 
-                [self.config.LSTM_SIZE * 2, self.config.DATASET_RANGE])
-            linear_b = self.initialize_biases_cpu(
-                (scope.name + self.config.EXTENSION_BIASES), 
+            state_batch = lstm_forward.zero_state(
+                self.config.BATCH_SIZE,
+                tf.float32)
+
+            controller_w = self.initialize_weights_cpu(
+                (scope.name + self.config.PREFIX_OUTPUT + self.config.EXTENSION_WEIGHTS), 
+                [self.config.LSTM_SIZE, self.config.DATASET_RANGE])
+            controller_b = self.initialize_biases_cpu(
+                (scope.name + self.config.PREFIX_OUTPUT + self.config.EXTENSION_BIASES), 
                 [self.config.DATASET_RANGE])
-            output_batch = tf.add(tf.tensordot(
-                tf.concat(output_batch, 2),
-                linear_w,
-                1), linear_b)
+
+            operator_w = self.initialize_weights_cpu(
+                (scope.name + self.config.PREFIX_OPERATOR + self.config.EXTENSION_WEIGHTS), 
+                [self.config.LSTM_SIZE, self.config.OP_SIZE])
+            operator_b = self.initialize_biases_cpu(
+                (scope.name + self.config.PREFIX_OPERATOR + self.config.EXTENSION_BIASES), 
+                [self.config.OP_SIZE])
+
+            operand_w = self.initialize_weights_cpu(
+                (scope.name + self.config.PREFIX_OPERAND + self.config.EXTENSION_WEIGHTS), 
+                [self.config.LSTM_SIZE, self.config.HEAP_SIZE])
+            operand_b = self.initialize_biases_cpu(
+                (scope.name + self.config.PREFIX_OPERAND + self.config.EXTENSION_BIASES), 
+                [self.config.HEAP_SIZE])
+            heap_batch = tf.zeros([
+                self.config.BATCH_SIZE, 
+                self.config.HEAP_SIZE])
+
+            inputs_batch = [
+                tf.reshape(tf.slice(x_batch, [0, i, 0], [
+                    self.config.BATCH_SIZE, 
+                    1, 
+                    self.config.DATASET_RANGE]),
+                    [self.config.BATCH_SIZE, self.config.DATASET_RANGE])
+                for i in range(self.config.DATASET_COLUMNS * 2)]
+            outputs_batch = []
+
+            for i in inputs_batch:
+                x_inputs = tf.concat([
+                    i, 
+                    tf.cast(heap_batch, tf.float32)], 1)
+                hidden_batch, state_batch = lstm_forward.call(
+                    x_inputs,
+                    state_batch)
+                outputs_batch += [tf.add(tf.tensordot(
+                    hidden_batch,
+                    controller_w,
+                    1), controller_b)]
+                operator_batch = tf.add(tf.tensordot(
+                    hidden_batch,
+                    operator_w,
+                    1), operator_b)
+                operand_batch = tf.add(tf.tensordot(
+                    hidden_batch,
+                    operand_w,
+                    1), operand_b)
+                heap_batch = self.heap.interact(
+                    operator_batch,
+                    operand_batch)
+            
             parameters = tf.get_collection(
                 tf.GraphKeys.TRAINABLE_VARIABLES,
                 scope=scope.name)
@@ -333,7 +371,7 @@ class Experiment(object):
                     (self.config.PREFIX_CONTROLLER + self.config.COLLECTION_PARAMETERS),
                     p)
         return tf.reshape(
-            output_batch, [
+            tf.stack(outputs_batch, axis=1), [
                 self.config.BATCH_SIZE,
                 self.config.DATASET_COLUMNS * 2,
                 self.config.DATASET_RANGE])
@@ -397,8 +435,13 @@ class Experiment(object):
         controller_parameters = tf.get_collection(
             self.config.PREFIX_CONTROLLER + self.config.COLLECTION_PARAMETERS)
         gradient = self.minimize(loss, controller_parameters)
-        tf.add_to_collection(self.config.TRAIN_OP, tf.group(gradient, increment))
-        tf.add_to_collection(self.config.VAL_OP, tf.group(increment))
+        reset_op = self.heap.reset()
+        tf.add_to_collection(
+            self.config.TRAIN_OP, 
+            tf.group(gradient, increment, reset_op))
+        tf.add_to_collection(
+            self.config.VAL_OP, 
+            tf.group(increment, reset_op))
         return controller_parameters
 
     def train(
@@ -413,8 +456,9 @@ class Experiment(object):
                 self.config(1, 0)
             else:
                 model_checkpoint = tf.train.latest_checkpoint(self.config.CHECKPOINT_BASEDIR)
-                model_saver = tf.train.import_meta_graph(
-                    model_checkpoint + ".meta")
+                model_saver = tf.train.Saver(
+                    var_list=(self.build_graph() 
+                        + tf.get_collection(self.config.GLOBAL_STEP_OP)))
                 self.config(1, int(model_checkpoint.split("-")[1]))
             data_saver = TrainRecordHook(self.config)
             with tf.train.MonitoredTrainingSession(hooks=[
@@ -456,8 +500,9 @@ class Experiment(object):
         model_checkpoint = tf.train.latest_checkpoint(self.config.CHECKPOINT_BASEDIR)
         self.config(1, int(model_checkpoint.split("-")[1]))
         with tf.Graph().as_default():
-            model_saver = tf.train.import_meta_graph(
-                model_checkpoint + ".meta")
+            model_saver = tf.train.Saver(
+                    var_list=(self.build_graph() 
+                        + tf.get_collection(self.config.GLOBAL_STEP_OP)))
             data_saver = ValRecordHook(self.config)
             with tf.train.MonitoredTrainingSession(hooks=[
                     tf.train.StopAtStepHook(num_steps=self.config.VAL_STOP_AT_STEP),

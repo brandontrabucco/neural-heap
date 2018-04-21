@@ -28,30 +28,32 @@ class TFMinHeapPQ(object):
         def __repr__(self):
             return repr(self.x)
         def __eq__(self, y):
-            return self.outer.h(self.x) == y.outer.h(y.x)
+            return self.outer.hash(self.x) == y.outer.hash(y.x)
         def __ne__(self, y):
-            return self.outer.h(self.x) != y.outer.h(y.x)
+            return self.outer.hash(self.x) != y.outer.hash(y.x)
         def __gt__(self, y):
-            return self.outer.h(self.x) > y.outer.h(y.x)
+            return self.outer.hash(self.x) > y.outer.hash(y.x)
         def __lt__(self, y):
-            return self.outer.h(self.x) < y.outer.h(y.x)
+            return self.outer.hash(self.x) < y.outer.hash(y.x)
         def __ge__(self, y):
-            return self.outer.h(self.x) >= y.outer.h(y.x)
+            return self.outer.hash(self.x) >= y.outer.hash(y.x)
         def __le__(self, y):
-            return self.outer.h(self.x) <= y.outer.h(y.x)
+            return self.outer.hash(self.x) <= y.outer.hash(y.x)
     
-    def __init__(self, n, i, v, h):
+    def __init__(self, n, i, v):
         """Initialize the data structure with name, 
         the number instances, the size of element vectors, 
         and the hashing function."""
         self.name = n
         self.instances = i
-        self.vsize = v
-        self.h = h
-        self.reset()
+        self.hidden_size = v
+        self.hash_weights = np.random.normal(
+            0, 1, (1, self.hidden_size))
+        self._reset()
+
+    def hash(self, x):
+        return np.sum(x * self.hash_weights)
         
-    def reset(self):
-        self.pq = [[] for _ in range(self.instances)]
         
     def __str__(self):
         return str(self.pq)
@@ -66,29 +68,41 @@ class TFMinHeapPQ(object):
         operator = operator.reshape(
             (self.instances, 3))
         operand = operand.reshape(
-            (self.instances, self.vsize))
+            (self.instances, self.hidden_size))
         action = np.argmax(operator, axis=-1)
         result = []
         for i in range(self.instances):
-            if action[i] == 0:
+            if action[i] == 0: #push
                 heappush(
                     self.pq[i], 
                     TFMinHeapPQ.Node(
                         operand[i, :], 
                         self))
                 result += [operand[i, :]]
-            elif action[i] == 1:
-                result += [self.pq[i][0].x]
-            else:
-                result += [heappop(self.pq[i]).x]
+            elif action[i] == 1: #peek
+                if len(self.pq[i]) > 0:
+                    result += [self.pq[i][0].x]
+                else :
+                    result += [np.zeros(self.hidden_size)]
+            else: #poll
+                if len(self.pq[i]) > 0:
+                    result += [heappop(self.pq[i]).x]
+                else :
+                    result += [np.zeros(self.hidden_size)]
         return np.vstack(result)
     
     def _interact_grad(self, op, grad):
         """Currently this op is not differentiable, 
-        and so gradients are zero."""
+        but gradient is passed through input."""
         operator = op.inputs[0]
         operand = op.inputs[1]
-        return grad, grad
+        return np.zeros(operator.shape), grad
+
+    def _reset(self):
+        self.pq = [[] for _ in range(self.instances)]
+
+    def _reset_grad(self, op, grad):
+        pass
     
     def interact(self, operator, operand):
         """Connect the data structure to delayed computation, 
@@ -99,8 +113,26 @@ class TFMinHeapPQ(object):
                 [operator, operand]) as name:
             result = py_func(
                 self._interact,
-                [operator, operand],
+                [tf.cast(operator, tf.float64), 
+                    tf.cast(operand, tf.float64)],
                 [tf.float64],
                 name=name,
                 grad=self._interact_grad)
-            return result[0]
+            return tf.reshape(
+                tf.cast(result[0], tf.float64), 
+                [self.instances, self.hidden_size])
+
+    def reset(self):
+        """ Reset the priority queue by removing
+         all the elements inside. """
+        with ops.name_scope(
+                self.name + "_reset",
+                self.name + "_reset",
+                []) as name:
+            result = py_func(
+                self._reset,
+                [],
+                [],
+                name=name + "_reset",
+                grad=self._reset_grad)
+            return result
