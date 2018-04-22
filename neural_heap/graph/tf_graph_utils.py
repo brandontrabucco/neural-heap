@@ -48,6 +48,16 @@ class TFGraphUtils(object):
                 dtype=tf.float32)
         return biases
 
+    def l2_loss(
+            self,
+            prediction,
+            labels,
+            collection):
+        l2_norm = tf.nn.l2_loss(
+                labels - prediction)
+        tf.add_to_collection(collection, l2_norm)
+        return l2_norm
+
     def cross_entropy(
             self,
             prediction,
@@ -125,6 +135,9 @@ class TFGraphUtils(object):
                 q_function_w,
                 1), q_function_b)]
 
+        best_q = tf.reduce_max(
+            tf.stack(q_buffer, axis=1), 
+            axis=1)
         best_q_indices = tf.argmax(
             tf.stack(q_buffer, axis=1), 
             axis=1, 
@@ -132,7 +145,11 @@ class TFGraphUtils(object):
         best_q_enumerated = tf.stack([
                 tf.range(self.config.BATCH_SIZE, dtype=tf.int32),
                 best_q_indices], axis=1)
-        return hidden_buffer, state_buffer, best_q_enumerated, best_q_indices
+        return (hidden_buffer, 
+            state_buffer,
+            best_q, 
+            best_q_enumerated, 
+            best_q_indices)
 
     def prepare_inputs_actions(
             self, 

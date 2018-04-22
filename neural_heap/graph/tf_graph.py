@@ -65,68 +65,71 @@ class TFGraph(object):
                 operand_w, 
                 operand_b)
         
-
     def inference(
             self,
             args,
             x_batch):
-        with tf.variable_scope(
-                (args.PREFIX_CONTROLLER + args.EXTENSION_NUMBER(1))) as scope:
-            (lstm_forward, 
-                controller_w, 
-                controller_b, 
-                q_function_w, 
-                q_function_b, 
-                operand_w, 
-                operand_b) = self.construct_parameters(args)
-            state_batch = lstm_forward.zero_state(
-                args.BATCH_SIZE,
-                tf.float32)
-            heap_batch = tf.zeros([
-                args.BATCH_SIZE, 
-                args.HEAP_SIZE])
-            inputs_batch, actions_batch = self.tf_graph_utils.prepare_inputs_actions(
-                x_batch)
-            outputs_batch = []
+        (lstm_forward, 
+            controller_w, 
+            controller_b, 
+            q_function_w, 
+            q_function_b, 
+            operand_w, 
+            operand_b) = self.construct_parameters(args)
+        state_batch = lstm_forward.zero_state(
+            args.BATCH_SIZE,
+            tf.float32)
+        heap_batch = tf.zeros([
+            args.BATCH_SIZE, 
+            args.HEAP_SIZE])
+        inputs_batch, actions_batch = self.tf_graph_utils.prepare_inputs_actions(
+            x_batch)
+        outputs_batch = []
+        q_batch = []
 
-            for i in inputs_batch:
-                x_inputs = tf.concat([
-                    i, 
-                    tf.cast(heap_batch, tf.float32)], axis=1)
-                (hidden_buffer,
-                    state_buffer,
-                    best_q_enumerated,
-                    best_q_indices) = self.tf_graph_utils.expand_hidden_state(
-                        actions_batch,
-                        x_inputs,
-                        lstm_forward,
-                        state_batch,
-                        q_function_w,
-                        q_function_b)
-                hidden_batch = tf.gather_nd(
-                    tf.stack(hidden_buffer, axis=1),
-                    best_q_enumerated)
-                state_batch = self.tf_graph_utils.argmax_state_tuple(
-                    state_buffer, 
-                    best_q_enumerated)
+        for i in inputs_batch:
+            x_inputs = tf.concat([
+                i, 
+                tf.cast(heap_batch, tf.float32)], axis=1)
+            (hidden_buffer,
+                state_buffer,
+                best_q,
+                best_q_enumerated,
+                best_q_indices) = self.tf_graph_utils.expand_hidden_state(
+                    actions_batch,
+                    x_inputs,
+                    lstm_forward,
+                    state_batch,
+                    q_function_w,
+                    q_function_b)
+            hidden_batch = tf.gather_nd(
+                tf.stack(hidden_buffer, axis=1),
+                best_q_enumerated)
+            state_batch = self.tf_graph_utils.argmax_state_tuple(
+                state_buffer, 
+                best_q_enumerated)
+            q_batch += [best_q]
 
-                outputs_batch += [tf.add(tf.tensordot(
-                    hidden_batch,
-                    controller_w,
-                    1), controller_b)]
-                operand_batch = tf.add(tf.tensordot(
-                    hidden_batch,
-                    operand_w,
-                    1), operand_b)
-                heap_batch = self.heap.interact(
-                    args,
-                    tf.one_hot(best_q_indices, 3),
-                    operand_batch)
-        return tf.reshape(
+            outputs_batch += [tf.add(tf.tensordot(
+                hidden_batch,
+                controller_w,
+                1), controller_b)]
+            operand_batch = tf.add(tf.tensordot(
+                hidden_batch,
+                operand_w,
+                1), operand_b)
+            heap_batch = self.heap.interact(
+                args,
+                tf.one_hot(best_q_indices, 3),
+                operand_batch)
+        return (tf.reshape(
             tf.stack(outputs_batch, axis=1), [
                 args.BATCH_SIZE,
                 args.DATASET_COLUMNS * 2,
-                args.DATASET_RANGE])
+                args.DATASET_RANGE]), tf.reshape(
+                    tf.stack(q_batch, axis=1), [
+                        args.BATCH_SIZE,
+                        args.DATASET_COLUMNS * 2]))
 
     def build_graph(
             self,
@@ -152,20 +155,40 @@ class TFGraph(object):
         tf.add_to_collection(
             args.LABELS_DETOKENIZED_OP,
             self.tf_dataset.tf_dataset_utils.detokenize_example(labels_batch))
-        prediction = self.inference(args, inputs_batch)
+        prediction, q_function = self.inference(args, inputs_batch)
         tf.add_to_collection(args.PREDICTION_OP, prediction)
         tf.add_to_collection(
             args.PREDICTION_DETOKENIZED_OP,
             self.tf_dataset.tf_dataset_utils.detokenize_example(prediction))
             
-        loss = self.tf_graph_utils.cross_entropy(
+        s_loss = self.tf_graph_utils.cross_entropy(
             prediction,
             labels_batch,
             (args.PREFIX_CONTROLLER + args.COLLECTION_LOSSES))
-        tf.add_to_collection(args.LOSS_OP, loss)
+        q_expanded = tf.pad(q_function, [[0, 0], [0, 1]])
+        reward_signal = tf.stop_gradient(
+            -tf.reduce_sum(
+                tf.square(prediction - labels_batch),
+                axis=2) / 2)
+        q_loss = self.tf_graph_utils.l2_loss(
+            tf.slice(
+                q_expanded, 
+                [0, 0], 
+                [args.BATCH_SIZE, args.DATASET_COLUMNS * 2]),
+            (reward_signal + 0.9 * tf.stop_gradient(
+                tf.slice(
+                    q_expanded, 
+                    [0, 1], 
+                    [args.BATCH_SIZE, args.DATASET_COLUMNS * 2]))),
+            (args.PREFIX_CONTROLLER + args.COLLECTION_LOSSES))
+        
+        total_loss = s_loss + q_loss
+        tf.add_to_collection(args.LOSS_OP, total_loss)
         controller_parameters = tf.get_collection(
             args.PREFIX_CONTROLLER + args.COLLECTION_PARAMETERS)
-        gradient = self.tf_graph_utils.minimize(loss, controller_parameters)
+        gradient = self.tf_graph_utils.minimize(
+            total_loss, 
+            controller_parameters)
         reset_op = self.heap.reset(args)
         tf.add_to_collection(
             args.TRAIN_OP, 

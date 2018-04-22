@@ -27,13 +27,13 @@ class TFExperiment(object):
                 model_saver = tf.train.Saver(
                     var_list=(self.tf_graph(self.config) 
                         + tf.get_collection(self.config.GLOBAL_STEP_OP)))
-                self.config(1, 0)
+                self.config(10, 0)
             else:
                 model_checkpoint = tf.train.latest_checkpoint(self.config.CHECKPOINT_BASEDIR)
                 model_saver = tf.train.Saver(
                     var_list=(self.tf_graph(self.config) 
                         + tf.get_collection(self.config.GLOBAL_STEP_OP)))
-                self.config(1, int(model_checkpoint.split("-")[1]))
+                self.config(10, int(model_checkpoint.split("-")[1]))
             data_saver = TFTrainRecord(self.config)
             with tf.train.MonitoredTrainingSession(hooks=[
                     tf.train.StopAtStepHook(

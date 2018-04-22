@@ -23,8 +23,6 @@ def py_func(
         return tf.py_func(func, inp, Tout, stateful=stateful, name=name)
 
 class TFHeapNode(object):
-    """This class is used as a container for vectors
-    that can be compared using a hashing function."""
     def __init__(self, x, outer):
         self.x = x
         self.outer = outer
@@ -86,12 +84,12 @@ class TFHeapUtils(object):
             elif action[i] == 1: #peek
                 if len(self.pq[i]) > 0:
                     result += [self.pq[i][0].x]
-                else :
+                else:
                     result += [np.zeros(self.config.HEAP_SIZE)]
             else: #poll
                 if len(self.pq[i]) > 0:
                     result += [heappop(self.pq[i]).x]
-                else :
+                else:
                     result += [np.zeros(self.config.HEAP_SIZE)]
         return np.vstack(result)
     
