@@ -81,8 +81,6 @@ class TFGraph(object):
                 state_buffer = []
                 q_buffer = []
 
-                print(state_batch)
-
                 for a in actions_batch:
                     a_inputs = tf.concat([
                         x_inputs,
@@ -123,7 +121,6 @@ class TFGraph(object):
                         hidden_state)
                     state_batch += [lstm_tuple]
                 state_batch = tuple(state_batch)
-                print(state_batch)
 
                 outputs_batch += [tf.add(tf.tensordot(
                     hidden_batch,
