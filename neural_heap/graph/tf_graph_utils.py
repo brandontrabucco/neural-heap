@@ -75,3 +75,79 @@ class TFGraphUtils(object):
             loss, 
             var_list=parameters)
         return gradient
+
+    def argmax_state_tuple(
+            self,
+            state_buffer,
+            best_q_enumerated):
+        state_batch = []
+        for z in range(self.config.LSTM_DEPTH):
+            cell_state = tf.stack([
+                state_buffer[a][z].c for a in range(self.config.OP_SIZE)
+            ], axis=1)
+            cell_state = tf.gather_nd(
+                cell_state, 
+                best_q_enumerated)
+            hidden_state = tf.stack([
+                state_buffer[a][z].h for a in range(self.config.OP_SIZE)
+            ], axis=1)
+            hidden_state = tf.gather_nd(
+                hidden_state, 
+                best_q_enumerated)
+            lstm_tuple = tf.contrib.rnn.LSTMStateTuple(
+                cell_state, 
+                hidden_state)
+            state_batch += [lstm_tuple]
+        return tuple(state_batch)
+
+    def expand_hidden_state(
+            self,
+            actions_batch,
+            x_inputs,
+            lstm_forward,
+            state_batch,
+            q_function_w,
+            q_function_b):
+        hidden_buffer = []
+        state_buffer = []
+        q_buffer = []
+        for a in actions_batch:
+            a_inputs = tf.concat([
+                x_inputs,
+                a], axis=1)
+            q_hidden_batch, q_state_batch = lstm_forward.call(
+                a_inputs,
+                state_batch)
+            hidden_buffer += [q_hidden_batch]
+            state_buffer += [q_state_batch]
+            q_buffer += [tf.add(tf.tensordot(
+                q_hidden_batch,
+                q_function_w,
+                1), q_function_b)]
+
+        best_q_indices = tf.argmax(
+            tf.stack(q_buffer, axis=1), 
+            axis=1, 
+            output_type=tf.int32)
+        best_q_enumerated = tf.stack([
+                tf.range(self.config.BATCH_SIZE, dtype=tf.int32),
+                best_q_indices], axis=1)
+        return hidden_buffer, state_buffer, best_q_enumerated, best_q_indices
+
+    def prepare_inputs_actions(
+            self, 
+            x_batch):
+        inputs_batch = [
+            tf.reshape(tf.slice(x_batch, [0, i, 0], [
+                self.config.BATCH_SIZE, 
+                1, 
+                self.config.DATASET_RANGE]),
+                [self.config.BATCH_SIZE, self.config.DATASET_RANGE])
+            for i in range(self.config.DATASET_COLUMNS * 2)]
+        actions_batch = [
+            tf.tile(
+                tf.reshape(
+                    tf.one_hot(i, self.config.OP_SIZE),
+                    [1, self.config.OP_SIZE]),
+                [self.config.BATCH_SIZE, 1]) for i in range(self.config.OP_SIZE)]
+        return inputs_batch, actions_batch

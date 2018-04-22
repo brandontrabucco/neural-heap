@@ -16,10 +16,9 @@ class TFGraph(object):
         self.tf_dataset = TFDataset(parser=parser)
         self.heap = TFHeap(parser=parser)
 
-    def inference(
+    def construct_parameters(
             self,
-            args,
-            x_batch):
+            args):
         with tf.variable_scope(
                 (args.PREFIX_CONTROLLER + args.EXTENSION_NUMBER(0))) as scope:
             lstm_forward = [tf.contrib.rnn.DropoutWrapper(
@@ -29,9 +28,6 @@ class TFGraph(object):
                 output_keep_prob=args.DROPOUT_PROBABILITY) for i in range(args.LSTM_DEPTH)]
             lstm_forward = tf.contrib.rnn.MultiRNNCell(
                 lstm_forward)
-            state_batch = lstm_forward.zero_state(
-                args.BATCH_SIZE,
-                tf.float32)
 
             controller_w = self.tf_graph_utils.initialize_weights_cpu(
                 (scope.name + args.PREFIX_OUTPUT + args.EXTENSION_WEIGHTS), 
@@ -53,74 +49,66 @@ class TFGraph(object):
             operand_b = self.tf_graph_utils.initialize_biases_cpu(
                 (scope.name + args.PREFIX_OPERAND + args.EXTENSION_BIASES), 
                 [args.HEAP_SIZE])
+
+            parameters = tf.get_collection(
+                tf.GraphKeys.TRAINABLE_VARIABLES,
+                scope=scope.name)
+            for p in parameters:
+                tf.add_to_collection(
+                    (args.PREFIX_CONTROLLER + args.COLLECTION_PARAMETERS),
+                    p)
+            return (lstm_forward, 
+                controller_w, 
+                controller_b, 
+                q_function_w, 
+                q_function_b, 
+                operand_w, 
+                operand_b)
+        
+
+    def inference(
+            self,
+            args,
+            x_batch):
+        with tf.variable_scope(
+                (args.PREFIX_CONTROLLER + args.EXTENSION_NUMBER(1))) as scope:
+            (lstm_forward, 
+                controller_w, 
+                controller_b, 
+                q_function_w, 
+                q_function_b, 
+                operand_w, 
+                operand_b) = self.construct_parameters(args)
+            state_batch = lstm_forward.zero_state(
+                args.BATCH_SIZE,
+                tf.float32)
             heap_batch = tf.zeros([
                 args.BATCH_SIZE, 
                 args.HEAP_SIZE])
-
-            inputs_batch = [
-                tf.reshape(tf.slice(x_batch, [0, i, 0], [
-                    args.BATCH_SIZE, 
-                    1, 
-                    args.DATASET_RANGE]),
-                    [args.BATCH_SIZE, args.DATASET_RANGE])
-                for i in range(args.DATASET_COLUMNS * 2)]
-            actions_batch = [
-                tf.tile(
-                    tf.reshape(
-                        tf.one_hot(i, args.OP_SIZE),
-                        [1, args.OP_SIZE]),
-                    [args.BATCH_SIZE, 1]) for i in range(args.OP_SIZE)]
+            inputs_batch, actions_batch = self.tf_graph_utils.prepare_inputs_actions(
+                x_batch)
             outputs_batch = []
-
 
             for i in inputs_batch:
                 x_inputs = tf.concat([
                     i, 
                     tf.cast(heap_batch, tf.float32)], axis=1)
-                hidden_buffer = []
-                state_buffer = []
-                q_buffer = []
-
-                for a in actions_batch:
-                    a_inputs = tf.concat([
+                (hidden_buffer,
+                    state_buffer,
+                    best_q_enumerated,
+                    best_q_indices) = self.tf_graph_utils.expand_hidden_state(
+                        actions_batch,
                         x_inputs,
-                        a], axis=1)
-                    q_hidden_batch, q_state_batch = lstm_forward.call(
-                        a_inputs,
-                        state_batch)
-                    hidden_buffer += [q_hidden_batch]
-                    state_buffer += [q_state_batch]
-                    q_buffer += [tf.add(tf.tensordot(
-                        q_hidden_batch,
+                        lstm_forward,
+                        state_batch,
                         q_function_w,
-                        1), q_function_b)]
-
-                best_q_indices = tf.argmax(
-                    tf.stack(q_buffer, axis=1), 
-                    axis=1, 
-                    output_type=tf.int32)
-                best_q_enumerated = tf.stack([
-                        tf.range(args.BATCH_SIZE, dtype=tf.int32),
-                        best_q_indices], axis=1)
+                        q_function_b)
                 hidden_batch = tf.gather_nd(
                     tf.stack(hidden_buffer, axis=1),
                     best_q_enumerated)
-
-                state_batch = []
-                for z in range(args.LSTM_DEPTH):
-                    cell_state = tf.stack([
-                        state_buffer[a][z].c for a in range(args.OP_SIZE)
-                    ], axis=1)
-                    cell_state = tf.gather_nd(cell_state, best_q_enumerated)
-                    hidden_state = tf.stack([
-                        state_buffer[a][z].h for a in range(args.OP_SIZE)
-                    ], axis=1)
-                    hidden_state = tf.gather_nd(hidden_state, best_q_enumerated)
-                    lstm_tuple = tf.contrib.rnn.LSTMStateTuple(
-                        cell_state, 
-                        hidden_state)
-                    state_batch += [lstm_tuple]
-                state_batch = tuple(state_batch)
+                state_batch = self.tf_graph_utils.argmax_state_tuple(
+                    state_buffer, 
+                    best_q_enumerated)
 
                 outputs_batch += [tf.add(tf.tensordot(
                     hidden_batch,
@@ -134,14 +122,6 @@ class TFGraph(object):
                     args,
                     tf.one_hot(best_q_indices, 3),
                     operand_batch)
-            
-            parameters = tf.get_collection(
-                tf.GraphKeys.TRAINABLE_VARIABLES,
-                scope=scope.name)
-            for p in parameters:
-                tf.add_to_collection(
-                    (args.PREFIX_CONTROLLER + args.COLLECTION_PARAMETERS),
-                    p)
         return tf.reshape(
             tf.stack(outputs_batch, axis=1), [
                 args.BATCH_SIZE,
